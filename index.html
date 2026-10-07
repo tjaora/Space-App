@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Junior Astronaut Spacewalk Trainer</title>
+<style>
+  :root{--deep:#050c1f;--navy:#0d1b3d;--foam:#eaf4ff;--orange:#ff6a2b;--sun:#ffc94a;--ok:#3ddc97;--bad:#ff5d73}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--deep);color:var(--foam);font-family:"Trebuchet MS","Segoe UI",system-ui,sans-serif;
+       display:flex;flex-direction:column;align-items:center;min-height:100vh;padding:10px}
+  h1{font-size:1.1rem;margin:4px 0 8px;letter-spacing:.4px}
+  #wrap{position:relative;width:100%;max-width:900px}
+  canvas{width:100%;display:block;border-radius:14px;border:2px solid #1d3a7a;background:#000;touch-action:none}
+  #ov{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:14px;border-radius:14px;
+      background:rgba(5,12,31,.82)}
+  #ov.hidden{display:none}
+  #card{max-width:560px;background:var(--navy);border:2px solid #2a4fa8;border-radius:16px;padding:20px 24px}
+  #card h2{margin:0 0 8px;font-size:1.5rem}
+  #card p{line-height:1.5;margin:8px 0}
+  .tip{background:rgba(255,201,74,.13);border-left:4px solid var(--sun);padding:8px 12px;border-radius:6px}
+  .stat{display:flex;justify-content:space-between;border-bottom:1px solid #243a74;padding:4px 0}
+  button{font:inherit;font-weight:700;background:var(--orange);color:#fff;border:0;border-radius:12px;padding:11px 20px;cursor:pointer;font-size:1rem}
+  button:hover{filter:brightness(1.12)}
+  button:focus-visible{outline:3px solid var(--sun);outline-offset:2px}
+  #pad{display:grid;grid-template-columns:repeat(4,64px);gap:8px;margin-top:10px;user-select:none}
+  #pad button{padding:14px 0;background:#1d3a7a;touch-action:none}
+  #pad button.on{background:var(--orange)}
+  #pad .brake{grid-column:span 4;background:#2a8a6a}
+  small{opacity:.7;margin-top:8px;text-align:center}
+</style>
+</head>
+<body>
+<h1>Junior Astronaut Spacewalk Trainer</h1>
+<div id="wrap">
+  <canvas id="cv" width="900" height="560" aria-label="Spacewalk simulator"></canvas>
+  <div id="ov"><div id="card"></div></div>
+</div>
+<div id="pad">
+  <button data-k="left" aria-label="Thrust left">◀</button>
+  <button data-k="up" aria-label="Thrust up">▲</button>
+  <button data-k="down" aria-label="Thrust down">▼</button>
+  <button data-k="right" aria-label="Thrust right">▶</button>
+  <button data-k="brake" class="brake">Stabilize (uses extra air)</button>
+</div>
+<small>Keyboard: arrow keys or W A S D to thrust, Space to stabilize.</small>
+
+<script>
+const W = 900, H = 560;
+const cv = document.getElementById("cv"), ctx = cv.getContext("2d");
+const ov = document.getElementById("ov"), card = document.getElementById("card");
+const AX = 450, AY = 112, TETHER = 480;           // station anchor point + tether length
+const DOCK = { x: 450, y: 170 };                  // toolbox on the station
+
+/* ---------- input ---------- */
+const keys = {};
+const MAP = { ArrowLeft:"left", a:"left", ArrowRight:"right", d:"right", ArrowUp:"up", w:"up", ArrowDown:"down", s:"down", " ":"brake" };
+addEventListener("keydown", e => { const k = MAP[e.key]; if (k){ keys[k] = true; e.preventDefault(); } });
+addEventListener("keyup",   e => { const k = MAP[e.key]; if (k) keys[k] = false; });
+document.querySelectorAll("#pad button").forEach(b => {
+  const k = b.dataset.k;
+  b.addEventListener("pointerdown", e => { keys[k] = true; b.classList.add("on"); e.preventDefault(); });
+  ["pointerup","pointerleave","pointercancel"].forEach(ev => b.addEventListener(ev, () => { keys[k] = false; b.classList.remove("on"); }));
+});
+
+
+const LEVELS = [
+  { title:"Level 1: Grab the handrails",
+    intro:"There is no air in space, so nothing slows you down. If you thrust right, you keep drifting right until you thrust back the other way. Fly to each glowing ring and grab it.",
+    tip:"You can only grab a ring when your speed is in the green zone. Too fast and you bounce off.",
+    fact:"This is Newton's first law: a moving object keeps moving until a force changes it. It is why astronauts move slowly and carefully.",
+    objective: () => `Rings grabbed: ${G.objs.filter(o=>o.done).length}/${G.objs.length}`,
+    setup(){ return [[190,280],[460,430],[740,260]].map(p => ({type:"ring",x:p[0],y:p[1],done:false})); } },
+  { title:"Level 2: Repair the satellite",
+    intro:"A satellite has three damaged spots. Fly close to each red spot and hold still while the repair finishes.",
+    tip:"Stay inside the circle and keep your speed in the green zone. Drifting away resets the repair.",
+    fact:"Real astronauts repair and upgrade equipment on spacewalks that often last 6 to 7 hours, like the Hubble servicing missions.",
+    objective: () => `Spots repaired: ${G.objs.filter(o=>o.done).length}/${G.objs.length}`,
+    setup(){ return [[300,300],[600,300],[450,385]].map(p => ({type:"spot",x:p[0],y:p[1],prog:0,done:false})); } },
+  { title:"Level 3: Catch the loose tools",
+    intro:"Oh no! Two tools floated away. Match their speed, catch them gently, then carry them back to the orange toolbox on the station.",
+    tip:"Catch a tool by moving at about the same speed it is moving. Then fly to the toolbox and slow down.",
+    fact:"Astronauts tie tools to their suits with tethers. A tool that floats away becomes space junk travelling at about 28,000 km/h.",
+    objective: () => `Tools returned: ${G.objs.filter(o=>o.state==="done").length}/${G.objs.length}`,
+    setup(){ return [
+      {type:"tool",name:"wrench",x:130,y:340,vx:.8,vy:-.3,state:"free"},
+      {type:"tool",name:"camera",x:780,y:430,vx:-.7,vy:-.4,state:"free"} ]; } }
+];
+
+
+const G = { mode:"menu", lvl:0, o2:100, t:0, ast:{x:450,y:240,vx:0,vy:0}, objs:[], carry:null,
+            msg:"", msgT:0, parts:[], results:[] };
+const say = (t, s=2) => { if (G.msg !== t || G.msgT < .3){ G.msg = t; G.msgT = s; } };
+
+const stars = Array.from({length:130}, () => ({x:Math.random()*W, y:Math.random()*H, z:Math.random()*1.6+.4}));
+
+
+function showCard(html, btnText, cb){
+  card.innerHTML = html + `<p><button id="cb">${btnText}</button></p>`;
+  ov.classList.remove("hidden"); G.mode = "overlay";
+  const b = document.getElementById("cb"); b.onclick = cb; b.focus();
+}
+function menu(){
+  showCard(`<h2>Welcome, cadet!</h2>
+    <p>You are about to take your first spacewalk. You are tied to the space station by a tether, you have limited air, and you move by firing small thrusters.</p>
+    <p>Complete 3 training missions to graduate.</p>`, "Start training", () => startLevel(0));
+}
+function startLevel(i){
+  G.lvl = i; const L = LEVELS[i];
+  showCard(`<h2>${L.title}</h2><p>${L.intro}</p><div class="tip">${L.tip}</div>`, "Begin spacewalk", () => {
+    G.objs = L.setup(); G.carry = null; G.o2 = 100; G.t = 0; G.parts = [];
+    Object.assign(G.ast, {x:450,y:240,vx:0,vy:0});
+    ov.classList.add("hidden"); G.mode = "play"; say("Use the arrow keys to thrust", 3);
+  });
+}
+function levelDone(){
+  const L = LEVELS[G.lvl];
+  G.results.push({ o2:Math.round(G.o2), time:Math.round(G.t) });
+  const last = G.lvl === LEVELS.length - 1;
+  showCard(`<h2>Mission complete!</h2>
+    <div class="stat"><span>Time</span><b>${Math.round(G.t)} s</b></div>
+    <div class="stat"><span>Air left</span><b>${Math.round(G.o2)}%</b></div>
+    <p class="tip"><b>Did you know?</b> ${L.fact}</p>`,
+    last ? "See my results" : "Next mission", () => last ? graduation() : startLevel(G.lvl + 1));
+}
+function failed(){
+  showCard(`<h2>Out of air!</h2><p>Mission Control pulled you back safely to the station. Real astronauts watch their air all the time. Try again and use fewer thrust bursts.</p>`,
+    "Try again", () => startLevel(G.lvl));
+}
+function graduation(){
+  const avg = G.results.reduce((s,r)=>s+r.o2,0) / G.results.length;
+  const rank = avg >= 55 ? "Commander" : avg >= 30 ? "Flight Engineer" : "Rookie";
+  const total = G.results.reduce((s,r)=>s+r.time,0);
+  showCard(`<h2>You graduated! Rank: ${rank}</h2>
+    ${G.results.map((r,i)=>`<div class="stat"><span>Mission ${i+1}</span><b>${r.time}s, air left ${r.o2}%</b></div>`).join("")}
+    <div class="stat"><span>Total time</span><b>${total}s</b></div>
+    <p>Next up: a real Moon walk. Keep training!</p>`, "Train again", () => { G.results = []; startLevel(0); });
+}
+
+
+function update(dt, f){
+  const a = G.ast; G.t += dt; G.msgT -= dt;
+  const ix = (keys.right?1:0) - (keys.left?1:0), iy = (keys.down?1:0) - (keys.up?1:0);
+  let drain = 0.8;
+  if (ix || iy){
+    const m = Math.hypot(ix, iy);
+    a.vx += ix/m*0.07*f; a.vy += iy/m*0.07*f; drain += 1.6;
+    puff(a.x - ix/m*18, a.y - iy/m*18, -ix/m, -iy/m);
+  }
+  if (keys.brake){
+    const k = Math.pow(0.93, f); a.vx *= k; a.vy *= k; drain += 4;
+    const sp = Math.hypot(a.vx, a.vy); if (sp > .15) puff(a.x, a.y, a.vx/sp, a.vy/sp);
+  }
+  const sp = Math.hypot(a.vx, a.vy);
+  if (sp > 4.5){ a.vx *= 4.5/sp; a.vy *= 4.5/sp; }
+  a.x += a.vx*f; a.y += a.vy*f;
+
+
+  const dx = a.x-AX, dy = a.y-AY, d = Math.hypot(dx, dy);
+  if (d > TETHER){ a.vx -= dx/d*(d-TETHER)*0.01*f; a.vy -= dy/d*(d-TETHER)*0.01*f; say("Tether is tight! Thrust back toward the station."); }
+ 
+  if (a.x < 28){ a.x = 28; a.vx = Math.abs(a.vx)*.4; } if (a.x > W-28){ a.x = W-28; a.vx = -Math.abs(a.vx)*.4; }
+  if (a.y < 30){ a.y = 30; a.vy = Math.abs(a.vy)*.4; } if (a.y > H-40){ a.y = H-40; a.vy = -Math.abs(a.vy)*.4; }
+
+  G.o2 -= drain*dt;
+  if (G.o2 <= 0){ G.o2 = 0; failed(); return; }
+
+  const speed = Math.hypot(a.vx, a.vy);
+  for (const o of G.objs){
+    if (o.type === "ring" && !o.done){
+      if (Math.hypot(a.x-o.x, a.y-o.y) < 26){
+        if (speed < 1.3){ o.done = true; say("Grabbed! Nice and gentle."); }
+        else { a.vx *= -.6; a.vy *= -.6; say("Too fast! Slow down to grab the ring."); }
+      }
+    }
+    if (o.type === "spot" && !o.done){
+      const near = Math.hypot(a.x-o.x, a.y-o.y) < 38;
+      if (near && speed < .7){ o.prog += dt; if (o.prog >= 2){ o.done = true; say("Repaired!"); } }
+      else { o.prog = Math.max(0, o.prog - dt*2); if (near) say("Hold still to repair."); }
+    }
+    if (o.type === "tool" && o.state === "free"){
+      o.x += o.vx*f; o.y += o.vy*f;
+      if (o.x < 20 || o.x > W-20) o.vx *= -1; if (o.y < 190 || o.y > H-40) o.vy *= -1;
+      const dd = Math.hypot(a.x-o.x, a.y-o.y);
+      if (dd < 32 && !G.carry){
+        const rs = Math.hypot(o.vx-a.vx, o.vy-a.vy);
+        if (rs < 1.4){ o.state = "carried"; G.carry = o; say("Got it! Bring it to the toolbox."); }
+        else {
+          const nx = (o.x-a.x)/(dd||1), ny = (o.y-a.y)/(dd||1);
+          o.vx += nx*1.0; o.vy += ny*1.0; a.vx -= nx*.5; a.vy -= ny*.5;
+          o.x = a.x + nx*36; o.y = a.y + ny*36; say("Too rough! Match the tool's speed.");
+        }
+      }
+    }
+  }
+  if (G.carry && Math.hypot(a.x-DOCK.x, a.y-DOCK.y) < 42 && speed < 1.5){
+    G.carry.state = "done"; G.carry = null; say("Tool stored!");
+  }
+  for (const p of G.parts){ p.x += p.vx*f; p.y += p.vy*f; p.life -= dt; }
+  G.parts = G.parts.filter(p => p.life > 0);
+
+  const complete = G.lvl === 2 ? G.objs.every(o => o.state === "done") : G.objs.every(o => o.done);
+  if (complete) levelDone();
+}
+function puff(x, y, dx, dy){
+  for (let i = 0; i < 2; i++) G.parts.push({ x, y, vx:dx*2+(Math.random()-.5), vy:dy*2+(Math.random()-.5), life:.45 });
+}
+
+
+function rr(x, y, w, h, r, fill, stroke){
+  ctx.beginPath(); ctx.roundRect ? ctx.roundRect(x, y, w, h, r) : ctx.rect(x, y, w, h);
+  ctx.fillStyle = fill; ctx.fill(); if (stroke){ ctx.strokeStyle = stroke; ctx.lineWidth = 1.5; ctx.stroke(); }
+}
+function circ(x, y, r, fill){ ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fillStyle = fill; ctx.fill(); }
+
+function drawBackground(t){
+  ctx.fillStyle = "#02040d"; ctx.fillRect(0, 0, W, H);
+  for (const s of stars){
+    const x = ((s.x - t*4*s.z) % W + W) % W;
+    ctx.fillStyle = `rgba(255,255,255,${.35 + s.z*.25})`; ctx.fillRect(x, s.y, s.z, s.z);
+  }
+  
+  const cx = W/2, cy = H + 620, r = 760;
+  ctx.save(); ctx.beginPath(); ctx.arc(cx, cy, r, 0, 7); ctx.clip();
+  const g = ctx.createLinearGradient(0, H-150, 0, H); g.addColorStop(0, "#3a8ee6"); g.addColorStop(1, "#0b2f6b");
+  ctx.fillStyle = g; ctx.fillRect(0, H-160, W, 170);
+  ctx.fillStyle = "rgba(60,160,90,.8)";
+  for (let i = 0; i < 6; i++){ const x = ((i*210 + t*10) % (W+300)) - 150; ctx.beginPath(); ctx.ellipse(x, H-70+(i%3)*22, 90, 22, 0, 0, 7); ctx.fill(); }
+  ctx.fillStyle = "rgba(255,255,255,.4)";
+  for (let i = 0; i < 9; i++){ const x = ((i*160 + t*18) % (W+300)) - 150; ctx.beginPath(); ctx.ellipse(x, H-110+(i%4)*28, 70, 12, 0, 0, 7); ctx.fill(); }
+  ctx.restore();
+  ctx.save(); ctx.shadowColor = "#7fc4ff"; ctx.shadowBlur = 18; ctx.strokeStyle = "rgba(140,200,255,.6)"; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.arc(cx, cy, r, Math.PI*1.2, Math.PI*1.8); ctx.stroke(); ctx.restore();
+}
+function drawPanel(x, y){
+  const g = ctx.createLinearGradient(x, y, x+120, y+52); g.addColorStop(0, "#1c4fa8"); g.addColorStop(1, "#0a2a66");
+  rr(x, y, 120, 52, 3, g, "#8fb4ff");
+  ctx.strokeStyle = "rgba(170,205,255,.55)"; ctx.lineWidth = 1;
+  for (let i = 1; i < 6; i++){ ctx.beginPath(); ctx.moveTo(x+i*20, y); ctx.lineTo(x+i*20, y+52); ctx.stroke(); }
+  ctx.beginPath(); ctx.moveTo(x, y+26); ctx.lineTo(x+120, y+26); ctx.stroke();
+}
+function drawStation(){
+  rr(60, 80, 780, 12, 4, "#9aa7b8", "#e0e8f2");             // truss
+  drawPanel(100, 18); drawPanel(100, 100); drawPanel(680, 18); drawPanel(680, 100);
+  rr(370, 58, 160, 56, 14, "#dfe6ee", "#fff");               // main module
+  rr(385, 66, 130, 14, 6, "#b6c2d0");
+  circ(450, 112, 6, "#ff6a2b");                              // tether anchor
+  rr(DOCK.x-34, DOCK.y-14, 68, 28, 5, "#ff6a2b", "#ffd2b8"); // toolbox
+  ctx.fillStyle = "#fff"; ctx.font = "bold 12px sans-serif"; ctx.textAlign = "center"; ctx.fillText("TOOLS", DOCK.x, DOCK.y+4);
+}
+function drawSatellite(t){
+  rr(405, 270, 90, 60, 8, "#c9d1da", "#fff");
+  circ(450, 300, 12, "#33415a");
+  drawPanel(280, 272); drawPanel(500, 272);                 // wings
+  rr(398, 338, 104, 8, 3, "#9aa7b8");
+  rr(446, 346, 8, 26, 3, "#9aa7b8");
+}
+function drawObj(o, t){
+  if (o.type === "ring"){
+    if (o.done) return;
+    const p = 1 + .12*Math.sin(t*4);
+    ctx.save(); ctx.shadowColor = "#ffc94a"; ctx.shadowBlur = 16;
+    ctx.strokeStyle = "#ffc94a"; ctx.lineWidth = 5; ctx.beginPath(); ctx.arc(o.x, o.y, 22*p, 0, 7); ctx.stroke(); ctx.restore();
+  }
+  if (o.type === "spot"){
+    const col = o.done ? "#3ddc97" : (Math.sin(t*8) > 0 ? "#ff5d73" : "#aa2a3a");
+    circ(o.x, o.y, 11, col);
+    if (!o.done){
+      ctx.strokeStyle = "rgba(255,255,255,.5)"; ctx.setLineDash([5,5]); ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(o.x, o.y, 38, 0, 7); ctx.stroke(); ctx.setLineDash([]);
+      if (o.prog > 0){ ctx.strokeStyle = "#3ddc97"; ctx.lineWidth = 5; ctx.beginPath(); ctx.arc(o.x, o.y, 38, -Math.PI/2, -Math.PI/2 + o.prog/2*Math.PI*2); ctx.stroke(); }
+    }
+  }
+  if (o.type === "tool" && o.state !== "done") drawTool(o, t);
+}
+function drawTool(o, t){
+  const x = o.state === "carried" ? G.ast.x + 24 : o.x, y = o.state === "carried" ? G.ast.y + 10 : o.y;
+  ctx.save(); ctx.translate(x, y); ctx.rotate(t*1.5);
+  if (o.name === "wrench"){ rr(-16, -4, 32, 8, 3, "#b0bec5", "#fff"); circ(-16, 0, 8, "#b0bec5"); circ(-16, 0, 4, "#02040d"); }
+  else { rr(-14, -9, 28, 18, 4, "#37474f", "#cfd8dc"); circ(0, 0, 6, "#7fc4ff"); }
+  ctx.restore();
+}
+function drawAstro(a){
+  ctx.save(); ctx.translate(a.x, a.y); ctx.rotate(Math.max(-.5, Math.min(.5, a.vx*.12)));
+  const line = "#90a4ae";
+  rr(-18, -14, 36, 36, 8, "#cfd8dc", line);                 // backpack
+  rr(-12, 18, 10, 18, 5, "#f5f5f5", line); rr(2, 18, 10, 18, 5, "#f5f5f5", line);
+  rr(-14, -10, 28, 34, 10, "#ffffff", line);
+  rr(-6, 0, 12, 9, 3, "#ff6a2b");
+  rr(-25, -6, 10, 24, 5, "#f5f5f5", line); rr(15, -6, 10, 24, 5, "#f5f5f5", line);
+  circ(0, -20, 16, "#ffffff"); ctx.strokeStyle = line; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(0, -20, 16, 0, 7); ctx.stroke();
+  const g = ctx.createLinearGradient(-10, -28, 10, -12); g.addColorStop(0, "#ffd37a"); g.addColorStop(1, "#7a4b00");
+  ctx.beginPath(); ctx.ellipse(0, -20, 11, 9, 0, 0, 7); ctx.fillStyle = g; ctx.fill();
+  ctx.fillStyle = "rgba(255,255,255,.6)"; ctx.beginPath(); ctx.ellipse(-4, -24, 3.5, 2, -.5, 0, 7); ctx.fill();
+  ctx.restore();
+}
+function drawTether(){
+  const a = G.ast, d = Math.hypot(a.x-AX, a.y-AY), sag = Math.max(0, (TETHER-d)*.25);
+  ctx.strokeStyle = d > TETHER-40 ? "#ff5d73" : "#e9d9a8"; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(AX, AY); ctx.quadraticCurveTo((AX+a.x)/2, (AY+a.y)/2 + sag, a.x, a.y-4); ctx.stroke();
+}
+function drawHUD(){
+  const a = G.ast, sp = Math.hypot(a.vx, a.vy), L = LEVELS[G.lvl];
+  rr(14, 14, 190, 66, 10, "rgba(5,12,31,.75)");
+  ctx.textAlign = "left"; ctx.fillStyle = "#eaf4ff"; ctx.font = "bold 13px sans-serif"; ctx.fillText("AIR", 26, 34);
+  rr(60, 24, 130, 12, 6, "#17264d");
+  rr(60, 24, 130*G.o2/100, 12, 6, G.o2 < 25 ? "#ff5d73" : "#3ddc97");
+  const safe = sp < 1.3;
+  ctx.fillStyle = "#eaf4ff"; ctx.fillText("SPEED", 26, 60);
+  rr(78, 50, 112, 12, 6, "#17264d");
+  rr(78, 50, 112*Math.min(1, sp/4.5), 12, 6, safe ? "#3ddc97" : "#ffc94a");
+  ctx.fillStyle = safe ? "#3ddc97" : "#ffc94a"; ctx.font = "12px sans-serif"; ctx.fillText(safe ? "safe to grab" : "too fast to grab", 78, 76);
+  ctx.textAlign = "right"; ctx.font = "bold 15px sans-serif"; ctx.fillStyle = "#eaf4ff";
+  rr(W-250, 14, 236, 30, 10, "rgba(5,12,31,.75)"); ctx.fillStyle = "#eaf4ff"; ctx.fillText(L.objective(), W-26, 35);
+  if (G.msgT > 0 && G.msg){
+    ctx.textAlign = "center"; ctx.font = "bold 17px sans-serif";
+    const w = ctx.measureText(G.msg).width + 30;
+    rr(W/2-w/2, H-48, w, 34, 12, "rgba(5,12,31,.85)", "#ffc94a"); ctx.fillStyle = "#ffc94a"; ctx.fillText(G.msg, W/2, H-26);
+  }
+}
+
+function draw(t){
+  drawBackground(t);
+  drawStation();
+  if (G.lvl === 1) drawSatellite(t);
+  if (G.mode === "play" || G.mode === "overlay"){
+    G.objs.forEach(o => drawObj(o, t));
+    for (const p of G.parts){ ctx.fillStyle = `rgba(190,225,255,${Math.max(0, p.life/.45)})`; ctx.fillRect(p.x, p.y, 3, 3); }
+    drawTether(); drawAstro(G.ast);
+    if (G.mode === "play") drawHUD();
+  }
+}
+
+
+let last = performance.now();
+function frame(now){
+  const dt = Math.min(.05, (now-last)/1000); last = now;
+  if (G.mode === "play") update(dt, dt*60);
+  draw(now/1000);
+  requestAnimationFrame(frame);
+}
+menu();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
